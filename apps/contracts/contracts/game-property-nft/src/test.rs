@@ -1,4 +1,7 @@
-use soroban_sdk::{testutils::Address as _, Address, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    Address, Env,
+};
 
 use crate::{GamePropertyNft, GamePropertyNftClient, NftError, TOTAL_TILES};
 
@@ -156,4 +159,48 @@ fn test_get_property_invalid_id() {
 
     let result = client.try_get_property(&400);
     assert_eq!(result, Err(Ok(NftError::InvalidProperty.into())));
+}
+
+#[test]
+fn test_transfer_and_transfer_from_reset_last_claimed_ledger_and_preserve_level() {
+    let (env, treasury, game_engine, client) = initialized();
+    let alice = Address::generate(&env);
+    let spender = Address::generate(&env);
+    let bob = Address::generate(&env);
+
+    client.set_improvement_level(&game_engine, &7, &3);
+
+    let mut ledger = env.ledger().get();
+    ledger.sequence_number = 5_000;
+    env.ledger().set(ledger);
+
+    client.transfer(&treasury, &alice, &7);
+    let after_transfer = client.get_property(&7);
+    assert_eq!(after_transfer.owner, alice);
+    assert_eq!(after_transfer.level, 3);
+    assert_eq!(after_transfer.last_claimed_ledger, 5_000);
+
+    let mut ledger = env.ledger().get();
+    ledger.sequence_number = 9_500;
+    env.ledger().set(ledger);
+
+    client.approve(&alice, &spender, &7);
+    client.transfer_from(&spender, &alice, &bob, &7);
+    let after_transfer_from = client.get_property(&7);
+    assert_eq!(after_transfer_from.owner, bob);
+    assert_eq!(after_transfer_from.level, 3);
+    assert_eq!(after_transfer_from.last_claimed_ledger, 9_500);
+}
+
+#[test]
+fn test_set_last_claimed_ledger_rejects_invalid_property_and_preserves_untouched_level() {
+    let (_env, _treasury, game_engine, client) = initialized();
+
+    let invalid = client.try_set_last_claimed_ledger(&game_engine, &TOTAL_TILES, &500);
+    assert_eq!(invalid, Err(Ok(NftError::InvalidProperty.into())));
+
+    client.set_last_claimed_ledger(&game_engine, &12, &800);
+    let prop = client.get_property(&12);
+    assert_eq!(prop.level, 0);
+    assert_eq!(prop.last_claimed_ledger, 800);
 }

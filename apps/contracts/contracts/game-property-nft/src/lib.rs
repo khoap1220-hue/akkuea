@@ -66,7 +66,9 @@ impl GamePropertyNft {
         bump_owner_index(&env, &treasury);
     }
 
-    /// Transfer property
+    /// Transfer property ownership and reset `last_claimed_ledger` to the current
+    /// ledger while preserving `level` (reset-on-transfer policy: unclaimed rent is
+    /// forfeited unless the previous owner claims beforehand).
     pub fn transfer(env: Env, from: Address, to: Address, property_id: u32) {
         from.require_auth();
 
@@ -101,6 +103,7 @@ impl GamePropertyNft {
                 address: to.clone(),
             },
         );
+        checkpoint_rent_on_transfer(&env, &mut world, property_id);
 
         let mut approves = get_approvals(&env);
         approves.remove(property_id);
@@ -148,7 +151,8 @@ impl GamePropertyNft {
         events::emit_approve(&env, owner, spender, property_id);
     }
 
-    /// Transfer from approved spender
+    /// Transfer from approved spender and reset `last_claimed_ledger` to the current
+    /// ledger while preserving `level` (reset-on-transfer policy).
     pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, property_id: u32) {
         spender.require_auth();
 
@@ -189,6 +193,7 @@ impl GamePropertyNft {
                 address: to.clone(),
             },
         );
+        checkpoint_rent_on_transfer(&env, &mut world, property_id);
 
         let mut approves = approves;
         approves.remove(property_id);
@@ -359,11 +364,21 @@ impl GamePropertyNft {
             panic_with_error!(&env, NftError::Unauthorized);
         }
 
+        if property_id >= TOTAL_TILES {
+            panic_with_error!(&env, NftError::InvalidProperty);
+        }
+
+        let init_ledger = env
+            .storage()
+            .instance()
+            .get(&symbol_short!("init_ledg"))
+            .unwrap_or(0u64);
+
         let mut world = load_world(&env);
 
         let mut meta: PropertyMeta = world.get_typed(&env, property_id).unwrap_or(PropertyMeta {
             level: 0,
-            last_claimed_ledger: 0,
+            last_claimed_ledger: init_ledger,
             approved_spender: 0,
         });
 
@@ -409,6 +424,21 @@ fn load_world(env: &Env) -> SimpleWorld {
 }
 
 fn save_world(_env: &Env, _world: &SimpleWorld) {}
+
+fn checkpoint_rent_on_transfer(env: &Env, world: &mut SimpleWorld, property_id: u32) {
+    let init_ledger = env
+        .storage()
+        .instance()
+        .get(&symbol_short!("init_ledg"))
+        .unwrap_or(0u64);
+    let mut meta: PropertyMeta = world.get_typed(env, property_id).unwrap_or(PropertyMeta {
+        level: 0,
+        last_claimed_ledger: init_ledger,
+        approved_spender: 0,
+    });
+    meta.last_claimed_ledger = env.ledger().sequence() as u64;
+    world.set_typed(env, property_id, &meta);
+}
 
 fn get_approvals(env: &Env) -> Map<u32, Address> {
     env.storage()

@@ -713,4 +713,98 @@ mod tests {
         assert_eq!(earned_multiple, earned_single);
         assert_eq!(earned_multiple, BASE_RENTAL_RATE * 5);
     }
+
+    #[test]
+    fn test_aged_treasury_tile_transfer_pays_zero_until_full_epoch() {
+        let test = setup_test();
+        let alice = Address::generate(&test.env);
+
+        // Upgrade treasury tile 5 to Skyscraper before aging 63,000 epochs.
+        test.nft_client
+            .set_improvement_level(&test.engine_client.address, &5, &LEVEL_SKYSCRAPER);
+
+        let mut ledger = test.env.ledger().get();
+        ledger.sequence_number = 6_300_000;
+        test.env.ledger().set(ledger);
+
+        test.nft_client.transfer(&test.treasury, &alice, &5);
+
+        assert_eq!(test.engine_client.get_accrued_income(&5), 0);
+        assert_eq!(
+            test.engine_client.try_claim_rental(&alice, &5),
+            Err(Ok(EngineError::NothingToClaim.into()))
+        );
+
+        // Advance less than one full epoch: still nothing to claim.
+        let mut ledger = test.env.ledger().get();
+        ledger.sequence_number = 6_300_099;
+        test.env.ledger().set(ledger);
+        assert_eq!(test.engine_client.get_accrued_income(&5), 0);
+        assert_eq!(
+            test.engine_client.try_claim_rental(&alice, &5),
+            Err(Ok(EngineError::NothingToClaim.into()))
+        );
+
+        // Advance to one full epoch after transfer: pays 1 epoch at Skyscraper rate.
+        let mut ledger = test.env.ledger().get();
+        ledger.sequence_number = 6_300_100;
+        test.env.ledger().set(ledger);
+        let expected_one_epoch = BASE_RENTAL_RATE * 6;
+        assert_eq!(test.engine_client.get_accrued_income(&5), expected_one_epoch);
+
+        let before = test.token_client.balance(&alice);
+        test.engine_client.claim_rental(&alice, &5);
+        assert_eq!(test.token_client.balance(&alice) - before, expected_one_epoch);
+    }
+
+    #[test]
+    fn test_secondary_transfer_and_escrow_return_do_not_carry_unclaimed_rent() {
+        let test = setup_test();
+        let escrow = Address::generate(&test.env);
+        let carol = Address::generate(&test.env);
+
+        // Bob upgrades tile 0 to Skyscraper and accrues 1,000 epochs without claiming.
+        test.engine_client.improve(&test.owner, &0);
+        test.engine_client.improve(&test.owner, &0);
+        test.engine_client.improve(&test.owner, &0);
+
+        let mut ledger = test.env.ledger().get();
+        ledger.sequence_number = (1_000 * EPOCH_LENGTH) as u32;
+        test.env.ledger().set(ledger);
+        assert_eq!(
+            test.engine_client.get_accrued_income(&0),
+            BASE_RENTAL_RATE * 6 * 1_000
+        );
+
+        // Listing escrows via transfer_from, then ages 250 epochs before Carol buys.
+        test.nft_client.approve(&test.owner, &escrow, &0);
+        test.nft_client.transfer_from(&escrow, &test.owner, &escrow, &0);
+
+        let mut ledger = test.env.ledger().get();
+        ledger.sequence_number = (1_250 * EPOCH_LENGTH) as u32;
+        test.env.ledger().set(ledger);
+
+        test.nft_client.transfer(&escrow, &carol, &0);
+        assert_eq!(test.nft_client.get_property(&0).level, LEVEL_SKYSCRAPER);
+        assert_eq!(test.engine_client.get_accrued_income(&0), 0);
+        assert_eq!(
+            test.engine_client.try_claim_rental(&carol, &0),
+            Err(Ok(EngineError::NothingToClaim.into()))
+        );
+
+        // Cancel path: Carol escrows for 300 epochs and cancels back to herself.
+        test.nft_client.approve(&carol, &escrow, &0);
+        test.nft_client.transfer_from(&escrow, &carol, &escrow, &0);
+
+        let mut ledger = test.env.ledger().get();
+        ledger.sequence_number = (1_550 * EPOCH_LENGTH) as u32;
+        test.env.ledger().set(ledger);
+
+        test.nft_client.transfer(&escrow, &carol, &0);
+        assert_eq!(test.engine_client.get_accrued_income(&0), 0);
+        assert_eq!(
+            test.engine_client.try_claim_rental(&carol, &0),
+            Err(Ok(EngineError::NothingToClaim.into()))
+        );
+    }
 }

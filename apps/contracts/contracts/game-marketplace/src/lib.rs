@@ -140,7 +140,10 @@ impl GameMarketplace {
     ///
     /// The seller must have already called `approve(seller, marketplace, property_id)`
     /// on the NFT contract. This function calls `transfer_from` to take custody.
-    /// `price` must be strictly positive.
+    /// Because NFT transfers reset `last_claimed_ledger` to the current ledger
+    /// (reset-on-transfer policy), any unclaimed rent is forfeited when listing
+    /// and no rent accrues during escrow; sellers must claim rental income before
+    /// listing. `price` must be strictly positive.
     pub fn list(env: Env, seller: Address, property_id: u32, price: i128) {
         seller.require_auth();
 
@@ -392,7 +395,7 @@ mod tests {
     use soroban_sdk::{
         testutils::{
             storage::{Instance as _, Persistent as _},
-            Address as _,
+            Address as _, Ledger,
         },
         token::{StellarAssetClient, TokenClient},
         Address, Env,
@@ -401,6 +404,7 @@ mod tests {
     struct Setup<'a> {
         env: Env,
         treasury: Address,
+        game_engine: Address,
         marketplace_id: Address,
         marketplace: GameMarketplaceClient<'a>,
         nft: GamePropertyNftClient<'a>,
@@ -429,6 +433,7 @@ mod tests {
         Setup {
             env,
             treasury,
+            game_engine,
             marketplace_id,
             marketplace,
             nft,
@@ -929,5 +934,51 @@ mod tests {
         assert_eq!(second.seller, s.treasury);
         assert_eq!(second.property_id, 25);
         assert_eq!(second.price, 888);
+    }
+
+    #[test]
+    fn test_list_buy_and_cancel_checkpoint_claim_ledger_and_preserve_level() {
+        let s = setup();
+        let bob = Address::generate(&s.env);
+        let carol = Address::generate(&s.env);
+        mint_land(&s, &carol, 10_000);
+
+        s.nft.transfer(&s.treasury, &bob, &40);
+        s.nft.set_improvement_level(&s.game_engine, &40, &3);
+
+        let mut ledger = s.env.ledger().get();
+        ledger.sequence_number = 100_000;
+        s.env.ledger().set(ledger);
+
+        s.nft.approve(&bob, &s.marketplace_id, &40);
+        s.marketplace.list(&bob, &40, &2_500);
+        assert_eq!(s.nft.get_property(&40).last_claimed_ledger, 100_000);
+
+        let mut ledger = s.env.ledger().get();
+        ledger.sequence_number = 150_000;
+        s.env.ledger().set(ledger);
+
+        s.marketplace.buy(&carol, &40);
+        let bought = s.nft.get_property(&40);
+        assert_eq!(bought.owner, carol);
+        assert_eq!(bought.level, 3);
+        assert_eq!(bought.last_claimed_ledger, 150_000);
+
+        let mut ledger = s.env.ledger().get();
+        ledger.sequence_number = 160_000;
+        s.env.ledger().set(ledger);
+
+        s.nft.approve(&carol, &s.marketplace_id, &40);
+        s.marketplace.list(&carol, &40, &3_000);
+
+        let mut ledger = s.env.ledger().get();
+        ledger.sequence_number = 190_000;
+        s.env.ledger().set(ledger);
+
+        s.marketplace.cancel(&carol, &40);
+        let cancelled = s.nft.get_property(&40);
+        assert_eq!(cancelled.owner, carol);
+        assert_eq!(cancelled.level, 3);
+        assert_eq!(cancelled.last_claimed_ledger, 190_000);
     }
 }
